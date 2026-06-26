@@ -4,6 +4,14 @@
 
 > **重要免責**：所有指標、評分、訊號與篩選結果均為依規則進行的客觀計算呈現，**非投資建議**，亦不構成買賣推薦。資料可能延遲、缺漏或計算誤差；投資有風險，請依自身判斷並諮詢合格專業人士。
 
+## 線上 Demo（GitHub Pages 靜態版）
+
+公開網址：**https://bearjimmy.github.io/tw-stock-screener/**
+
+- 前端會自動偵測：在 `*.github.io` 上 → **靜態模式**，直接讀 `data/` 內的盤後 JSON 快照（不需後端）。
+- 在 `localhost` 上 → **動態模式**，打本機 FastAPI 的 `/api/*`（資料即時）。
+- 靜態版的資料是「**最後一次 push 的快照**」，不會自動更新；要更新就重新 `git add -f data/... && git commit && git push`（可日後加 GitHub Action 自動化）。
+
 ---
 
 ## 一、架構總覽
