@@ -10,7 +10,23 @@
 
 - 前端會自動偵測：在 `*.github.io` 上 → **靜態模式**，直接讀 `data/` 內的盤後 JSON 快照（不需後端）。
 - 在 `localhost` 上 → **動態模式**，打本機 FastAPI 的 `/api/*`（資料即時）。
-- 靜態版的資料是「**最後一次 push 的快照**」，不會自動更新；要更新就重新 `git add -f data/... && git commit && git push`（可日後加 GitHub Action 自動化）。
+### 線上資料自動更新（GitHub Action）
+
+線上版的資料由 **GitHub Action 在雲端自動更新**，不需開電腦、不需手動 push：
+
+| 項目 | 設定 |
+|---|---|
+| Workflow | `.github/workflows/update-data.yml` |
+| 排程 | 每週一至五 **UTC 10:00 = 台灣 18:00**（`cron: '0 10 * * 1-5'`） |
+| 流程 | 雲端 runner 跑 `fetch_and_compute.py --days 35` → 組 `_site`（index.html + data 快照）→ `deploy-pages` 直接部署 |
+| Token | FinMind token 存在 repo **Secret `FINMIND_TOKEN`**（Settings → Secrets and variables → Actions），不在程式碼裡 |
+| 資料 | **不 commit 進 repo**（用 Pages artifact 部署），避免 git 歷史每天膨脹 20MB |
+
+- **手動立即更新**：GitHub repo → Actions 分頁 → 選「每日更新台股資料並部署 Pages」→ Run workflow。
+- **改排程時間**：編輯 workflow 的 `cron`（記得用 UTC；台灣時間 −8）。
+- **Pages 來源**：已設為 **GitHub Actions**（非 deploy from branch），所以 commit 進 main 的 `data/` 快照僅作參考、實際線上資料以 Action 產出為準。
+
+> 本機的 Windows Task Scheduler（`update.ps1`，18:00）只更新**本機 localhost** 用的 `data/`，與線上版互不影響；若你只用線上版，可停用本機排程：`schtasks /Delete /TN "TaiwanStockUpdate" /F`。
 
 ---
 
