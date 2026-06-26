@@ -601,16 +601,50 @@ let STOCKS = [];                 // /api/stocks 結果（市場總覽用）
 let MARKET = null;               // /api/market 結果（頂部摘要列用）
 const STOCK_CACHE = {};          // /api/stock/{id} 結果（個股詳情頁，記憶體 cache）
 
-async function apiGet(path){
-  const r = await fetch(API_BASE + path);
+/* ============================ 雙模式：本機後端 vs GitHub Pages 靜態檔 ============================
+   - 本機（localhost / 127.0.0.1）：打 FastAPI 的 /api/*，資料即時、可即時篩選。
+   - GitHub Pages（*.github.io 等）：沒有後端 → 改讀盤後產生的靜態 JSON 快照 ./data/*.json，
+     screener 改在前端用同一份 STOCKS 過濾（過濾規則對齊 main.py 的 /api/screener）。
+   判斷規則：hostname 是 localhost/127.0.0.1 → 動態模式；其餘一律靜態模式。 */
+const STATIC_MODE = !['localhost', '127.0.0.1', ''].includes(location.hostname);
+
+async function fetchJson(url){
+  const r = await fetch(url);
   if(r.status === 404) return { __notfound: true };
   if(!r.ok){
-    // 後端回 503/500 時 detail 是中文 hint
     let detail = r.statusText;
     try { const j = await r.json(); detail = j.detail || detail; } catch(e){}
     throw new Error(detail);
   }
   return r.json();
+}
+
+/* 靜態模式：把 /api/* 路徑映射成 ./data/*.json（相對 index.html，Pages 子路徑也正確）。 */
+async function apiGetStatic(path){
+  if(path === '/api/market')  return fetchJson('data/market.json');
+  if(path === '/api/stocks')  return fetchJson('data/stocks.json');
+  if(path.startsWith('/api/stock/')){
+    const id = path.slice('/api/stock/'.length);
+    return fetchJson('data/details/' + encodeURIComponent(id) + '.json');
+  }
+  if(path.startsWith('/api/screener')){
+    // 前端過濾：規則需與 main.py:api_screener 一致。
+    const qs = new URLSearchParams(path.split('?')[1] || '');
+    const all = await fetchJson('data/stocks.json');
+    let list = Array.isArray(all) ? all : [];
+    if(qs.get('breakout')) list = list.filter(s => s.fired);
+    if(qs.get('instbuy'))  list = list.filter(s => (s.instNet || 0) > 0);
+    if(qs.has('score'))    list = list.filter(s => (s.score || 0) >= +qs.get('score'));
+    if(qs.has('streak'))   list = list.filter(s => (s.instStreak || 0) >= +qs.get('streak'));
+    if(qs.has('foreign'))  list = list.filter(s => (s.foreignPct || 0) >= +qs.get('foreign'));
+    return list;
+  }
+  throw new Error('未知的資料路徑：' + path);
+}
+
+async function apiGet(path){
+  if(STATIC_MODE) return apiGetStatic(path);
+  return fetchJson(API_BASE + path);
 }
 
 async function loadStocks(force){
