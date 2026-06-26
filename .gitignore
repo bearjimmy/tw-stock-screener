@@ -1,0 +1,18 @@
+# Secrets — 絕不入 git
+.finmind_token
+# Claude Code 本機設定：settings.local.json 會記錄含 token 的指令 → 必須排除
+.claude/
+
+# 抓取結果與快取（每次都會重生成，不需版控）
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

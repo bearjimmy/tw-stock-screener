@@ -1,0 +1,1223 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>台股選股工具（原型 v2）</title>
+
+<!-- ===== 圖表函式庫：TradingView 官方 lightweight-charts（CDN 載入）=====
+     用於個股頁的：蠟燭圖（K 線）、histogram（法人買賣超）、line（外資持股趨勢）。
+     載入失敗時頁面會降級顯示佔位文字，不會破版。 -->
+<!-- 版本鎖定 v4：本檔使用 addCandlestickSeries / addHistogramSeries / setMarkers 等 v4 API；
+     v5 已改為 addSeries(...) 寫法，故鎖版避免 CDN 抓到新版而失效。 -->
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+
+<!-- 同源掛載：FastAPI 用 StaticFiles 把本檔與 /api/* 都 serve 在 http://localhost:8000/
+     → API_BASE 留空字串即可。若日後拆獨立 server，改為 'http://localhost:8000'。 -->
+<script>const API_BASE = '';</script>
+
+<style>
+/* ===================== 設計變數（深色、漲紅跌綠 - 台股慣例）===================== */
+:root{
+  --bg:#0f1115;          /* 整體背景 */
+  --bg-2:#161a20;        /* 卡片 / 表頭背景 */
+  --bg-3:#1d222b;        /* hover / 次級表面 */
+  --border:#262b35;      /* 分隔線 */
+  --text:#d6dae0;        /* 主要文字 */
+  --text-dim:#8a909a;    /* 次要文字 */
+  --text-faint:#5c626c;  /* 更淡文字 */
+  --up:#e63946;          /* 漲 = 紅（台股慣例，與美股相反）*/
+  --down:#26a69a;        /* 跌 = 綠 */
+  --accent:#3a8fff;      /* 強調藍（頁籤、連結）*/
+  --radius:8px;
+  --mono:"SF Mono","Roboto Mono",Consolas,"Courier New",monospace;
+}
+
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,"Segoe UI","PingFang TC","Microsoft JhengHei",
+              "Noto Sans TC",Roboto,sans-serif;
+  font-size:14px;
+  line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* 數字一律用等寬，排版乾淨對齊 */
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;}
+
+/* ===================== 頂部導覽列 ===================== */
+header.topbar{
+  position:sticky;top:0;z-index:50;
+  display:flex;align-items:center;gap:24px;
+  padding:0 20px;height:52px;
+  background:var(--bg-2);
+  border-bottom:1px solid var(--border);
+}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;white-space:nowrap;}
+.brand .logo{
+  width:22px;height:22px;border-radius:6px;
+  background:linear-gradient(135deg,var(--up),var(--accent));
+  display:inline-block;
+}
+.brand small{font-weight:400;color:var(--text-dim);font-size:11px;}
+
+nav.tabs{display:flex;gap:4px;height:100%;}
+nav.tabs a{
+  display:flex;align-items:center;padding:0 14px;height:100%;
+  color:var(--text-dim);text-decoration:none;font-size:14px;
+  border-bottom:2px solid transparent;white-space:nowrap;
+}
+nav.tabs a:hover{color:var(--text);}
+nav.tabs a.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600;}
+
+.topbar .spacer{flex:1;}
+.topbar .obj-tag{
+  font-size:11px;color:var(--text-dim);
+  border:1px solid var(--border);border-radius:99px;padding:3px 10px;white-space:nowrap;
+}
+
+/* ===================== 頂部股票查詢 ===================== */
+.search-box{position:relative;width:260px;}
+.search-box input{
+  width:100%;height:30px;
+  background:var(--bg-3);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);font-size:13px;padding:0 30px 0 30px;
+  font-family:inherit;outline:none;
+}
+.search-box input:focus{border-color:var(--accent);}
+.search-box input::placeholder{color:var(--text-faint);}
+/* 放大鏡 icon（用 SVG 背景圖避免依賴字型） */
+.search-box::before{
+  content:"";position:absolute;left:10px;top:50%;transform:translateY(-50%);
+  width:13px;height:13px;opacity:.55;pointer-events:none;
+  background:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a909a' stroke-width='2.4' stroke-linecap='round'><circle cx='10' cy='10' r='7'/><line x1='15.5' y1='15.5' x2='21' y2='21'/></svg>") no-repeat center/contain;
+}
+
+.search-results{
+  position:absolute;top:calc(100% + 4px);left:0;right:0;
+  background:var(--bg-2);border:1px solid var(--border);border-radius:6px;
+  max-height:360px;overflow-y:auto;z-index:60;
+  box-shadow:0 8px 24px rgba(0,0,0,.5);
+  display:none;
+}
+.search-results.show{display:block;}
+.search-results .item{
+  display:flex;align-items:center;gap:10px;
+  padding:8px 12px;cursor:pointer;font-size:13px;
+  border-bottom:1px solid var(--border);
+}
+.search-results .item:last-child{border-bottom:none;}
+.search-results .item:hover,
+.search-results .item.active{background:var(--bg-3);}
+.search-results .item .sid{font-family:var(--mono);color:var(--text);font-weight:600;min-width:48px;}
+.search-results .item .sname{color:var(--text-dim);flex:1;}
+.search-results .item .sscore{
+  font-family:var(--mono);font-size:11px;color:var(--text-faint);
+  background:var(--bg-3);padding:1px 8px;border-radius:99px;
+}
+.search-results .empty{padding:14px;color:var(--text-faint);font-size:12px;text-align:center;}
+@media(max-width:760px){.search-box{width:170px;}.topbar .obj-tag{display:none;}}
+
+/* ===================== 市場概況列（對標 TradingView 頂部摘要）===================== */
+.market-strip{
+  position:sticky;top:52px;z-index:40;
+  display:flex;align-items:stretch;overflow-x:auto;
+  background:var(--bg-2);border-bottom:1px solid var(--border);
+  font-size:12px;
+}
+.market-strip .item{
+  display:flex;flex-direction:column;gap:1px;
+  padding:7px 18px;border-right:1px solid var(--border);white-space:nowrap;
+}
+.market-strip .item .lab{color:var(--text-dim);font-size:11px;}
+.market-strip .item .val{font-family:var(--mono);font-size:14px;font-weight:600;}
+.market-strip .item .val small{font-size:11px;font-weight:400;margin-left:4px;}
+
+/* ===================== 版面容器 ===================== */
+main{max-width:1280px;margin:0 auto;padding:18px 20px;}
+.page{display:none;}
+.page.active{display:block;}
+
+h1.page-title{font-size:20px;margin:0 0 4px;}
+.page-sub{color:var(--text-dim);font-size:13px;margin:0 0 16px;}
+
+/* ===================== 篩選列 ===================== */
+.toolbar{
+  display:flex;flex-wrap:wrap;align-items:center;gap:14px 18px;
+  background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:11px 16px;margin-bottom:12px;
+}
+.toolbar .group{display:flex;align-items:center;gap:8px;}
+.toolbar label{color:var(--text-dim);font-size:13px;cursor:pointer;user-select:none;}
+.toolbar .chk{display:flex;align-items:center;gap:7px;cursor:pointer;}
+.toolbar input[type="checkbox"]{accent-color:var(--accent);width:15px;height:15px;cursor:pointer;}
+.toolbar input[type="range"]{accent-color:var(--accent);cursor:pointer;width:130px;}
+.toolbar .val{color:var(--text);font-family:var(--mono);min-width:30px;text-align:right;}
+.toolbar .divider{width:1px;align-self:stretch;background:var(--border);}
+.toolbar .count{margin-left:auto;color:var(--text-dim);font-size:13px;}
+.toolbar .count b{color:var(--text);font-family:var(--mono);}
+.btn-reset{
+  background:var(--bg-3);border:1px solid var(--border);color:var(--text-dim);
+  border-radius:6px;padding:5px 12px;font-size:13px;cursor:pointer;
+}
+.btn-reset:hover{color:var(--text);border-color:var(--text-faint);}
+
+/* ===================== 資料表（高密度，對標 TradingView）===================== */
+.table-wrap{
+  background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius);
+  overflow-x:auto;     /* 窄螢幕可橫向捲動，避免破版 */
+}
+table.market{width:100%;border-collapse:collapse;font-size:12.5px;min-width:1120px;}
+table.market thead th{
+  position:sticky;top:0;background:var(--bg-2);z-index:1;
+  text-align:right;padding:8px 12px;color:var(--text-dim);font-weight:600;
+  border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none;
+}
+table.market thead th.left{text-align:left;}
+table.market thead th.center{text-align:center;}
+table.market thead th.no-sort{cursor:default;}
+table.market thead th:hover:not(.no-sort){color:var(--text);}
+table.market thead th .arrow{color:var(--accent);font-size:11px;margin-left:3px;}
+table.market tbody td{
+  text-align:right;padding:6px 12px;border-bottom:1px solid var(--border);white-space:nowrap;
+}
+table.market tbody td.left{text-align:left;}
+table.market tbody td.center{text-align:center;}
+table.market tbody tr{cursor:pointer;}
+table.market tbody tr:hover{background:var(--bg-3);}
+table.market tbody tr:last-child td{border-bottom:none;}
+
+.sym-id{font-family:var(--mono);color:var(--text);font-weight:600;}
+.sym-name{color:var(--text-dim);font-size:12px;}
+
+.up{color:var(--up);}
+.down{color:var(--down);}
+.flat{color:var(--text-dim);}
+
+/* 漲跌幅色塊（TradingView 熱力感） */
+.pct-cell{border-radius:4px;}
+
+/* 迷你走勢圖 */
+svg.spark{display:block;margin-left:auto;}
+
+/* 策略訊號標籤 */
+.tag{
+  display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;
+  border:1px solid transparent;white-space:nowrap;line-height:1.5;
+}
+.tag.fire{color:#fff;background:var(--up);border-color:var(--up);font-weight:700;}
+.tag.inst{color:var(--accent);background:rgba(58,143,255,.14);border-color:rgba(58,143,255,.35);margin-left:4px;}
+.tag.none{color:var(--text-faint);}
+.tag.breakout{color:var(--up);background:rgba(230,57,70,.12);border-color:rgba(230,57,70,.35);}
+
+/* 技術評等色階標籤 */
+.rating{display:inline-block;font-size:11px;padding:2px 8px;border-radius:4px;white-space:nowrap;font-weight:600;}
+.rating.r-su{color:#fff;background:var(--up);}                         /* 強力偏多 */
+.rating.r-u{color:var(--up);background:rgba(230,57,70,.16);}           /* 偏多 */
+.rating.r-n{color:var(--text-dim);background:var(--bg-3);}             /* 中立 */
+.rating.r-d{color:var(--down);background:rgba(38,166,154,.16);}        /* 偏空 */
+.rating.r-sd{color:#fff;background:var(--down);}                       /* 強力偏空 */
+
+/* 評分膠囊 */
+.score{
+  display:inline-block;min-width:34px;text-align:center;
+  font-family:var(--mono);font-weight:600;font-size:12px;
+  padding:2px 8px;border-radius:6px;
+}
+.score.hi{color:#ffd9a0;background:rgba(255,170,60,.14);}
+.score.mid{color:var(--text);background:var(--bg-3);}
+.score.lo{color:var(--text-dim);background:var(--bg-3);}
+
+/* ===================== 個股詳情頁 ===================== */
+.detail-head{
+  display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 24px;
+  background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px 20px;margin-bottom:14px;
+}
+.detail-head .id-name{display:flex;flex-direction:column;gap:2px;}
+.detail-head .id-name .big{font-size:24px;font-weight:700;display:flex;align-items:center;gap:10px;}
+.detail-head .id-name .sub{color:var(--text-dim);font-family:var(--mono);}
+.detail-head .price-block{display:flex;align-items:baseline;gap:14px;}
+.detail-head .price-block .price{font-size:30px;font-weight:700;font-family:var(--mono);}
+.detail-head .price-block .chg{font-size:16px;font-family:var(--mono);}
+.detail-head .back{
+  margin-left:auto;color:var(--text-dim);text-decoration:none;font-size:13px;
+  border:1px solid var(--border);border-radius:6px;padding:6px 12px;
+}
+.detail-head .back:hover{color:var(--text);border-color:var(--text-faint);}
+
+.grid{display:grid;grid-template-columns:2fr 1fr;gap:16px;align-items:start;}
+@media(max-width:880px){.grid{grid-template-columns:1fr;}}
+
+.card{
+  background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px;margin-bottom:16px;
+}
+.card h3{margin:0 0 12px;font-size:14px;color:var(--text);font-weight:600;}
+.card h3 small{color:var(--text-faint);font-weight:400;font-size:11px;margin-left:6px;}
+.chart-box{width:100%;height:300px;position:relative;}
+.chart-box.small{height:160px;}
+.chart-placeholder{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:var(--text-faint);font-size:13px;text-align:center;padding:20px;
+}
+
+/* 個股頁圖表骨架（async 載入時的視覺提示） */
+.skeleton{
+  background:linear-gradient(90deg,var(--bg-3) 25%,var(--bg-2) 50%,var(--bg-3) 75%);
+  background-size:200% 100%;
+  animation:skel 1.4s ease-in-out infinite;
+}
+@keyframes skel{
+  0%{background-position:200% 0;}
+  100%{background-position:-200% 0;}
+}
+
+/* 後端資料載入失敗的紅色提示橫幅 */
+.data-error{
+  background:rgba(230,57,70,.14);border:1px solid var(--up);color:var(--text);
+  padding:10px 14px;border-radius:6px;margin:0 0 14px;font-size:13px;
+}
+
+/* 關鍵數據卡片 */
+.stat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;}
+.stat{background:var(--bg-3);border-radius:6px;padding:11px 13px;}
+.stat .k{color:var(--text-dim);font-size:12px;}
+.stat .v{font-family:var(--mono);font-size:19px;font-weight:600;margin-top:2px;}
+.stat .u{font-size:12px;color:var(--text-dim);font-weight:400;margin-left:2px;}
+
+/* 評分區塊 */
+.score-panel{text-align:center;padding:6px 0 2px;}
+.score-panel .big-score{font-family:var(--mono);font-size:44px;font-weight:700;line-height:1;}
+.score-panel .bar{height:8px;border-radius:99px;background:var(--bg-3);margin:14px 0 10px;overflow:hidden;}
+.score-panel .bar > span{display:block;height:100%;border-radius:99px;
+  background:linear-gradient(90deg,var(--accent),var(--up));}
+.score-panel .note{color:var(--text-dim);font-size:12px;}
+.score-panel .rating-line{margin:8px 0 0;font-size:12px;color:var(--text-dim);}
+
+/* 策略條件檢查表 */
+.verdict{margin:0 0 10px;font-size:13px;color:var(--text-dim);}
+.checklist{list-style:none;margin:0;padding:0;}
+.checklist li{display:flex;gap:9px;align-items:flex-start;padding:7px 0;
+  border-bottom:1px solid var(--border);font-size:13px;}
+.checklist li:last-child{border-bottom:none;}
+.checklist li .ck{width:16px;flex:none;font-weight:700;text-align:center;}
+.checklist li.ok{color:var(--text);}
+.checklist li.ok .ck{color:var(--up);}
+.checklist li.no{color:var(--text-dim);}
+.checklist li.no .ck{color:var(--text-faint);}
+.checklist li.filter{background:rgba(58,143,255,.05);margin:0 -6px;padding-left:6px;padding-right:6px;border-radius:4px;}
+
+/* ===================== 篩選器頁 ===================== */
+.screener-controls{
+  background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px 20px;margin-bottom:14px;
+}
+.screener-controls .row{
+  display:flex;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid var(--border);
+}
+.screener-controls .row:last-child{border-bottom:none;}
+.screener-controls .row .title{min-width:200px;}
+.screener-controls .row .title b{display:block;}
+.screener-controls .row .title span{color:var(--text-dim);font-size:12px;}
+.screener-controls .row .ctrl{display:flex;align-items:center;gap:10px;flex:1;}
+.screener-controls input[type="checkbox"]{accent-color:var(--accent);width:17px;height:17px;cursor:pointer;}
+.screener-controls input[type="range"]{accent-color:var(--accent);cursor:pointer;flex:1;max-width:260px;}
+.screener-controls .val{font-family:var(--mono);color:var(--text);min-width:42px;}
+
+/* 策略績效摘要 */
+.perf-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
+@media(max-width:700px){.perf-grid{grid-template-columns:repeat(2,1fr);}}
+.perf{background:var(--bg-3);border-radius:6px;padding:13px 14px;}
+.perf .k{font-size:12px;color:var(--text-dim);}
+.perf .v{font-family:var(--mono);font-size:22px;font-weight:700;margin-top:3px;}
+.perf .v.pos{color:var(--up);}
+.disclose{margin-top:12px;font-size:11.5px;color:var(--text-faint);line-height:1.6;
+  border-top:1px dashed var(--border);padding-top:10px;}
+
+.notice{
+  font-size:12px;color:var(--text-dim);
+  background:rgba(58,143,255,.07);border:1px solid rgba(58,143,255,.2);
+  border-radius:6px;padding:9px 13px;margin-bottom:12px;
+}
+
+/* ===================== 頁尾 ===================== */
+footer.foot{
+  max-width:1280px;margin:30px auto 0;padding:18px 20px 40px;
+  border-top:1px solid var(--border);color:var(--text-faint);font-size:12px;line-height:1.7;
+}
+footer.foot b{color:var(--text-dim);}
+
+/* 小工具 */
+.muted{color:var(--text-dim);}
+.empty{padding:40px;text-align:center;color:var(--text-faint);}
+
+@media(max-width:600px){
+  header.topbar{gap:12px;padding:0 12px;}
+  .topbar .obj-tag{display:none;}
+  main{padding:14px 12px;}
+  .detail-head .price-block .price{font-size:24px;}
+}
+</style>
+</head>
+<body>
+
+<!-- ===================== 頂部導覽（頁籤）===================== -->
+<header class="topbar">
+  <div class="brand">
+    <span class="logo"></span>
+    <span>台股選股工具 <small>原型 v2 · 教育用途</small></span>
+  </div>
+  <nav class="tabs">
+    <a href="#/market"   data-tab="market">市場總覽</a>
+    <a href="#/screener" data-tab="screener">策略篩選器</a>
+  </nav>
+  <div class="spacer"></div>
+
+  <!-- 股票查詢：代號或中文名即時搜尋，下拉 10 筆，點選跳個股頁 -->
+  <div class="search-box" id="search-box">
+    <input type="text" id="search-input" placeholder="查股票（代號或名稱，例：2330 / 台積電）"
+           autocomplete="off" spellcheck="false">
+    <div class="search-results" id="search-results"></div>
+  </div>
+
+  <span class="obj-tag">所有數據為客觀計算結果 · 非投資建議</span>
+</header>
+
+<!-- 市場概況列（由 /api/market 真實大盤摘要填入）-->
+<div class="market-strip" id="market-strip"></div>
+
+<main>
+  <!-- ===================== 頁面 1：市場總覽表 ===================== -->
+  <section id="page-market" class="page">
+    <h1 class="page-title">市場總覽</h1>
+    <p class="page-sub">資料來源：FinMind（每日盤後更新）。「策略訊號」為依各檔 K 線實際計算之客觀結果，供您自行瀏覽與篩選，非投資推薦。</p>
+
+    <!-- 篩選列：使用者自選條件 -->
+    <div class="toolbar">
+      <div class="group">
+        <label class="chk"><input type="checkbox" id="f-breakout"> 只看發動訊號</label>
+      </div>
+      <div class="divider"></div>
+      <div class="group">
+        <label class="chk"><input type="checkbox" id="f-instbuy"> 法人買超 &gt; 0</label>
+      </div>
+      <div class="divider"></div>
+      <div class="group">
+        <label for="f-score">評分 &gt;</label>
+        <input type="range" id="f-score" min="0" max="100" step="5" value="0">
+        <span class="val" id="f-score-val">0</span>
+      </div>
+      <button class="btn-reset" id="m-reset">重設</button>
+      <span class="count">符合 <b id="m-count">0</b> / <span id="m-total">0</span> 檔</span>
+    </div>
+
+    <div class="table-wrap">
+      <table class="market">
+        <thead>
+          <tr>
+            <th class="left no-sort">代號 / 名稱</th>
+            <th data-sort="price">現價</th>
+            <th data-sort="changePct">漲跌幅%</th>
+            <th class="center no-sort">近25日走勢</th>
+            <th data-sort="volume">成交量</th>
+            <th data-sort="turnover">成交額(億)</th>
+            <th data-sort="marketCap">市值</th>
+            <th class="center" data-sort="ratingLevel">技術評等</th>
+            <th class="center no-sort">策略訊號</th>
+            <th data-sort="instNet">法人買賣超</th>
+            <th data-sort="foreignPct">外資%</th>
+            <th data-sort="score">相對強勢</th>
+          </tr>
+        </thead>
+        <tbody id="market-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===================== 頁面 2：個股詳情頁 ===================== -->
+  <section id="page-stock" class="page">
+    <div class="detail-head">
+      <div class="id-name">
+        <span class="big" id="d-name">—</span>
+        <span class="sub" id="d-id">—</span>
+      </div>
+      <div class="price-block">
+        <span class="price num" id="d-price">—</span>
+        <span class="chg num" id="d-chg">—</span>
+      </div>
+      <a class="back" href="#/market">← 返回市場總覽</a>
+    </div>
+
+    <div class="grid">
+      <!-- 左欄：K 線 + 籌碼面圖 -->
+      <div>
+        <div class="card">
+          <h3>K 線圖 <small>近 60 日 · FinMind 真實資料 · 紅箭頭＝策略發動日</small></h3>
+          <div class="chart-box" id="chart-kline">
+            <div class="chart-placeholder">圖表載入中…</div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>三大法人買賣超 <small>近 30 日 · 張（買超紅／賣超綠）</small></h3>
+          <div class="chart-box small" id="chart-inst">
+            <div class="chart-placeholder">圖表載入中…</div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>外資持股比率趨勢 <small>近 30 日 · %</small></h3>
+          <div class="chart-box small" id="chart-foreign">
+            <div class="chart-placeholder">圖表載入中…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右欄：評分 + 條件檢查表 + 關鍵數據 -->
+      <div>
+        <div class="card">
+          <h3>相對強勢評分</h3>
+          <div class="score-panel">
+            <div class="big-score" id="d-score">—</div>
+            <div class="bar"><span id="d-score-bar" style="width:0%"></span></div>
+            <p class="note">此評分依技術面與籌碼面客觀計算（0–100），非投資建議。</p>
+            <p class="rating-line">技術評等：<span id="d-rating">—</span></p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>策略條件檢查表 <small>突破發動訊號 · 客觀計算</small></h3>
+          <div id="d-checklist"></div>
+        </div>
+
+        <div class="card">
+          <h3>關鍵數據 <small>FinMind 收盤後更新</small></h3>
+          <div class="stat-grid">
+            <div class="stat"><div class="k">ROE</div><div class="v"><span id="d-roe">—</span><span class="u">%</span></div></div>
+            <div class="stat"><div class="k">本益比 PER</div><div class="v"><span id="d-per">—</span><span class="u">倍</span></div></div>
+            <div class="stat"><div class="k">殖利率</div><div class="v"><span id="d-yield">—</span><span class="u">%</span></div></div>
+            <div class="stat"><div class="k">外資持股</div><div class="v"><span id="d-foreign">—</span><span class="u">%</span></div></div>
+            <div class="stat"><div class="k">市值</div><div class="v" style="font-size:16px;"><span id="d-cap">—</span></div></div>
+            <div class="stat"><div class="k">法人連續買超</div><div class="v"><span id="d-streak">—</span><span class="u">日</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 頁面 3：策略篩選器 ===================== -->
+  <section id="page-screener" class="page">
+    <h1 class="page-title">策略篩選器</h1>
+    <p class="page-sub">自行組合條件、篩出符合的股票。這是輔助工具，由您決定條件，非系統推薦。</p>
+
+    <!-- 策略績效摘要（示意假回測）-->
+    <div class="card">
+      <h3>策略歷史績效 <small>「突破發動訊號」· 示意統計</small></h3>
+      <div class="perf-grid">
+        <div class="perf"><div class="k">歷史發動次數</div><div class="v">1,284</div></div>
+        <div class="perf"><div class="k">達標率（20日內觸及 +10%）</div><div class="v pos">58.6%</div></div>
+        <div class="perf"><div class="k">中位達標天數</div><div class="v">7 日</div></div>
+        <div class="perf"><div class="k">平均最大報酬</div><div class="v pos">+14.2%</div></div>
+      </div>
+      <p class="disclose">※ 以上為<b>示意統計</b>，且採用「曾觸及」目標價而非「實際持有報酬」之計算方式，
+        會系統性高估真實可獲利程度；未計入滑價、手續費與停損。僅供參考，<b>非投資建議</b>。</p>
+    </div>
+
+    <div class="screener-controls">
+      <div class="row">
+        <div class="title"><b>突破發動訊號</b><span>只保留符合 2黑1紅＋量價突破之發動訊號</span></div>
+        <div class="ctrl"><label class="chk"><input type="checkbox" id="s-breakout"> 啟用此條件</label></div>
+      </div>
+      <div class="row">
+        <div class="title"><b>法人連續買超</b><span>三大法人連續買超天數門檻</span></div>
+        <div class="ctrl">
+          <label class="chk"><input type="checkbox" id="s-streak-on"> 啟用</label>
+          <span class="muted">≥</span>
+          <input type="range" id="s-streak" min="1" max="10" step="1" value="3">
+          <span class="val"><span id="s-streak-val">3</span> 日</span>
+        </div>
+      </div>
+      <div class="row">
+        <div class="title"><b>相對強勢評分門檻</b><span>只保留評分高於門檻者</span></div>
+        <div class="ctrl">
+          <span class="muted">評分 ≥</span>
+          <input type="range" id="s-score" min="0" max="100" step="5" value="70">
+          <span class="val" id="s-score-val">70</span>
+        </div>
+      </div>
+      <div class="row">
+        <div class="title"><b>外資持股比率</b><span>只保留外資持股高於門檻者</span></div>
+        <div class="ctrl">
+          <span class="muted">≥</span>
+          <input type="range" id="s-foreign" min="0" max="90" step="5" value="0">
+          <span class="val"><span id="s-foreign-val">0</span> %</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="notice">以下為符合您所選條件的股票（共 <b id="s-count">0</b> 檔），為客觀篩選結果，非投資推薦。</div>
+
+    <div class="table-wrap">
+      <table class="market">
+        <thead>
+          <tr>
+            <th class="left no-sort">代號 / 名稱</th>
+            <th class="no-sort">現價</th>
+            <th class="no-sort">漲跌幅%</th>
+            <th class="center no-sort">近25日走勢</th>
+            <th class="no-sort">成交量</th>
+            <th class="no-sort">成交額(億)</th>
+            <th class="no-sort">市值</th>
+            <th class="center no-sort">技術評等</th>
+            <th class="center no-sort">策略訊號</th>
+            <th class="no-sort">法人買賣超</th>
+            <th class="no-sort">外資%</th>
+            <th class="no-sort">相對強勢</th>
+          </tr>
+        </thead>
+        <tbody id="screener-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <b>免責聲明：</b>本網站為教育用途，行情資料來源為 FinMind（每日盤後批次更新），
+  網站內所有指標、評分、策略訊號與篩選結果均為依規則進行之客觀計算呈現，<b>非投資建議</b>，
+  亦不構成任何買賣推薦。資料可能存在延遲、缺漏或計算誤差；投資有風險，請依自身判斷並諮詢合格專業人士。
+</footer>
+
+<script>
+/* =================================================================================
+   v3：所有資料皆來自後端 FastAPI（fetch /api/* ）。
+   策略訊號、評分、評等都由後端 fetch_and_compute.py 在盤後批次算好，
+   前端只負責「畫」資料，邏輯與資料解耦。
+   ================================================================================= */
+
+/* ---- API 資料層：四個非同步 loader + 一個錯誤橫幅 ---- */
+let STOCKS = [];                 // /api/stocks 結果（市場總覽用）
+let MARKET = null;               // /api/market 結果（頂部摘要列用）
+const STOCK_CACHE = {};          // /api/stock/{id} 結果（個股詳情頁，記憶體 cache）
+
+async function apiGet(path){
+  const r = await fetch(API_BASE + path);
+  if(r.status === 404) return { __notfound: true };
+  if(!r.ok){
+    // 後端回 503/500 時 detail 是中文 hint
+    let detail = r.statusText;
+    try { const j = await r.json(); detail = j.detail || detail; } catch(e){}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+async function loadStocks(force){
+  // 已載入過 → 直接用記憶體版本，避免每次切頁都重打 API
+  if(!force && STOCKS.length) return STOCKS;
+  STOCKS = await apiGet('/api/stocks');
+  return STOCKS;
+}
+async function loadMarket(){
+  MARKET = await apiGet('/api/market');
+  return MARKET;
+}
+async function loadStock(id){
+  if(STOCK_CACHE[id]) return STOCK_CACHE[id];
+  const data = await apiGet('/api/stock/' + encodeURIComponent(id));
+  if(data && data.__notfound) return null;
+  STOCK_CACHE[id] = data;
+  return data;
+}
+async function loadScreener(qs){
+  return await apiGet('/api/screener' + (qs ? '?' + qs : ''));
+}
+
+function showError(msg){
+  let banner = document.getElementById('data-error');
+  if(!banner){
+    banner = document.createElement('div');
+    banner.id = 'data-error';
+    banner.className = 'data-error';
+    document.querySelector('main').prepend(banner);
+  }
+  banner.textContent = msg;
+}
+function clearError(){
+  const b = document.getElementById('data-error');
+  if(b) b.remove();
+}
+
+/* （v3：已移除全部前端假資料與重複計算函式；STOCKS / MARKET / STOCK_CACHE
+   由後端 fetch_and_compute.py 預先算好的 JSON 直接餵入。） */
+
+/* =================================================================================
+   以下為畫面渲染與互動邏輯（不含任何真實資料來源）。
+   ================================================================================= */
+
+/* ---- 數字格式化工具 ---- */
+const fmt = {
+  price: v => v.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}),
+  int:   v => v.toLocaleString('en-US'),
+  pct:   v => (v>0?'+':'') + v.toFixed(2) + '%',
+  signedInt: v => (v>0?'+':'') + v.toLocaleString('en-US'),
+  cap:   v => v>=10000 ? (v/10000).toFixed(2)+' 兆' : Math.round(v).toLocaleString('en-US')+' 億',
+};
+/* 依正負回傳漲紅跌綠 class */
+function dirClass(v){ return v>0 ? 'up' : v<0 ? 'down' : 'flat'; }
+/* 評分等級 class */
+function scoreClass(v){ return v>=75 ? 'hi' : v>=55 ? 'mid' : 'lo'; }
+
+/* 漲跌幅色塊底色：幅度越大顏色越濃（漲紅底、跌綠底）。 */
+function pctBg(pct){
+  if(!pct) return '';
+  const a = Math.min(0.4, Math.abs(pct)/8*0.4).toFixed(3);
+  const rgb = pct>0 ? '230,57,70' : '38,166,154';
+  return `background:rgba(${rgb},${a});`;
+}
+
+/* 迷你走勢圖（sparkline）：用近 25 日 close 畫 SVG 折線，漲紅跌綠（末值 vs 首值）。 */
+function sparkline(closes){
+  const w=84, h=24, pad=3;
+  const min=Math.min(...closes), max=Math.max(...closes), range=(max-min)||1;
+  const pts = closes.map((c,i)=>{
+    const x = pad + (i/(closes.length-1))*(w-2*pad);
+    const y = pad + (1-(c-min)/range)*(h-2*pad);
+    return x.toFixed(1)+','+y.toFixed(1);
+  }).join(' ');
+  const col = (closes[closes.length-1] >= closes[0]) ? 'var(--up)' : 'var(--down)';
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.3"
+      stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+}
+
+/* 策略訊號標籤 HTML（發動 / 法人挺 / 未發動）。 */
+function signalTag(s){
+  if(!s.fired) return '<span class="tag none">—</span>';
+  const inst = s.sig.instBacked ? '<span class="tag inst">法人挺</span>' : '';
+  return `<span class="tag fire">⚡ 發動</span>${inst}`;
+}
+
+/* ---- 一列股票的 HTML（市場總覽與篩選器共用）---- */
+function rowHtml(s){
+  const dir = dirClass(s.changePct);
+  return `<tr data-id="${s.id}">
+    <td class="left"><span class="sym-id">${s.id}</span> <span class="sym-name">${s.name}</span></td>
+    <td class="num">${fmt.price(s.price)}</td>
+    <td class="num pct-cell ${dir}" style="${pctBg(s.changePct)}">${fmt.pct(s.changePct)}</td>
+    <td class="center">${sparkline(s.sparkCloses)}</td>
+    <td class="num muted">${fmt.int(s.volume)}</td>
+    <td class="num">${s.turnover.toFixed(2)}</td>
+    <td class="num">${fmt.cap(s.marketCap)}</td>
+    <td class="center"><span class="rating ${s.rating.cls}">${s.rating.label}</span></td>
+    <td class="center">${signalTag(s)}</td>
+    <td class="num ${dirClass(s.instNet)}">${fmt.signedInt(s.instNet)}</td>
+    <td class="num">${s.foreignPct.toFixed(1)}</td>
+    <td><span class="score ${scoreClass(s.score)}">${s.score}</span></td>
+  </tr>`;
+}
+
+/* ============================ 市場概況列（頂部摘要）============================
+   v3：欄位全部用後端 /api/market 的真實值；TAIEX dataset 暫未抓，故移除該格。 */
+function renderStrip(){
+  const strip = document.getElementById('market-strip');
+  if(!MARKET){ strip.innerHTML = ''; return; }
+  const up = MARKET.up ?? 0, down = MARKET.down ?? 0, flat = MARKET.flat ?? 0;
+  const fired = MARKET.fired ?? 0;
+  const totalTurnover = MARKET.totalTurnover ?? 0;
+  // updated 為 ISO 字串「2026-06-25T19:32:11」，取後半當時鐘
+  const updated = (MARKET.updated || '').replace('T', ' ').slice(0, 19) || '—';
+  const items = [
+    {lab:'資料日期',         html:`${MARKET.date || '—'} <small>收盤</small>`},
+    {lab:'上漲 / 下跌 家數', html:`<span class="up">${up}</span> / <span class="down">${down}</span><small>平盤 ${flat}</small>`},
+    {lab:'符合策略發動',     html:`${fired} <small>檔</small>`},
+    {lab:'總成交額',         html:`${fmt.cap(totalTurnover)}`},
+    {lab:'更新時間',         html:`${updated}`},
+  ];
+  strip.innerHTML = items.map(it=>
+    `<div class="item"><span class="lab">${it.lab}</span><span class="val num">${it.html}</span></div>`
+  ).join('');
+}
+
+/* ============================ 頁面 1：市場總覽 ============================ */
+const marketState = { sortKey:'score', sortDir:-1 };  // 預設依評分由高到低
+
+function getMarketFiltered(){
+  const onlyBreakout = document.getElementById('f-breakout').checked;
+  const onlyInstBuy  = document.getElementById('f-instbuy').checked;
+  const scoreMin     = +document.getElementById('f-score').value;
+  return STOCKS.filter(s =>
+    (!onlyBreakout || s.fired) &&
+    (!onlyInstBuy  || s.instNet > 0) &&
+    (s.score >= scoreMin)
+  );
+}
+
+function renderMarket(){
+  let list = getMarketFiltered();
+  const { sortKey, sortDir } = marketState;
+  list = list.slice().sort((a,b)=> (a[sortKey]-b[sortKey]) * sortDir);
+
+  const body = document.getElementById('market-body');
+  body.innerHTML = list.length
+    ? list.map(rowHtml).join('')
+    : '<tr><td colspan="12" class="empty">沒有符合條件的股票，請調整篩選條件。</td></tr>';
+
+  document.getElementById('m-count').textContent = list.length;
+  document.getElementById('m-total').textContent = STOCKS.length;
+
+  // 更新表頭排序箭頭
+  document.querySelectorAll('#page-market thead th[data-sort]').forEach(th=>{
+    const k = th.getAttribute('data-sort');
+    th.querySelector('.arrow')?.remove();
+    if(k===sortKey){
+      const ar = document.createElement('span');
+      ar.className='arrow'; ar.textContent = sortDir<0 ? '▼' : '▲';
+      th.appendChild(ar);
+    }
+  });
+}
+
+function initMarket(){
+  // 排序：點欄位標題切換升/降序
+  document.querySelectorAll('#page-market thead th[data-sort]').forEach(th=>{
+    th.addEventListener('click', ()=>{
+      const k = th.getAttribute('data-sort');
+      if(marketState.sortKey===k){ marketState.sortDir *= -1; }
+      else { marketState.sortKey = k; marketState.sortDir = -1; }
+      renderMarket();
+    });
+  });
+  // 篩選器（市場頁仍走前端過濾——STOCKS 已載入記憶體，瞬時反應）
+  document.getElementById('f-breakout').addEventListener('change', renderMarket);
+  document.getElementById('f-instbuy').addEventListener('change', renderMarket);
+  const sc = document.getElementById('f-score');
+  sc.addEventListener('input', ()=>{
+    document.getElementById('f-score-val').textContent = sc.value;
+    renderMarket();
+  });
+  document.getElementById('m-reset').addEventListener('click', ()=>{
+    document.getElementById('f-breakout').checked = false;
+    document.getElementById('f-instbuy').checked = false;
+    sc.value = 0; document.getElementById('f-score-val').textContent = '0';
+    renderMarket();
+  });
+  // 點列進個股頁
+  document.getElementById('market-body').addEventListener('click', e=>{
+    const tr = e.target.closest('tr[data-id]');
+    if(tr) location.hash = '#/stock/' + tr.getAttribute('data-id');
+  });
+  // 注意：不在這裡呼叫 renderMarket()，避免 STOCKS 還沒載入就跑空表；改由 router() 觸發。
+}
+
+/* ============================ 頁面 3：策略篩選器 ============================
+   v3：條件過濾走 /api/screener。每次條件變動 → 組 query string → 後端過濾後重畫。
+   排序、UI 互動仍在前端。 */
+function buildScreenerQS(){
+  const params = new URLSearchParams();
+  if(document.getElementById('s-breakout').checked) params.set('breakout', '1');
+  if(document.getElementById('s-streak-on').checked) params.set('streak', document.getElementById('s-streak').value);
+  const sm = +document.getElementById('s-score').value;
+  if(sm > 0) params.set('score', sm);
+  const fm = +document.getElementById('s-foreign').value;
+  if(fm > 0) params.set('foreign', fm);
+  return params.toString();
+}
+
+let screenerSeq = 0;   // 避免條件快速變動時舊請求覆寫新請求
+async function renderScreener(){
+  const qs = buildScreenerQS();
+  const my = ++screenerSeq;
+  let list = [];
+  try{
+    list = await loadScreener(qs);
+  }catch(e){
+    showError('篩選器載入失敗：' + e.message);
+    return;
+  }
+  if(my !== screenerSeq) return;            // 過時請求，丟棄
+  list.sort((a,b)=> (b.score||0) - (a.score||0));   // 預設依評分排序
+  const body = document.getElementById('screener-body');
+  body.innerHTML = list.length
+    ? list.map(rowHtml).join('')
+    : '<tr><td colspan="12" class="empty">沒有符合條件的股票，請放寬條件。</td></tr>';
+  document.getElementById('s-count').textContent = list.length;
+}
+
+function initScreener(){
+  const bind = (id, valId)=>{
+    const el = document.getElementById(id);
+    el.addEventListener('input', ()=>{
+      if(valId) document.getElementById(valId).textContent = el.value;
+      renderScreener();
+    });
+    el.addEventListener('change', renderScreener);
+  };
+  bind('s-breakout');
+  bind('s-streak-on');
+  bind('s-streak','s-streak-val');
+  bind('s-score','s-score-val');
+  bind('s-foreign','s-foreign-val');
+  // 點列進個股頁
+  document.getElementById('screener-body').addEventListener('click', e=>{
+    const tr = e.target.closest('tr[data-id]');
+    if(tr) location.hash = '#/stock/' + tr.getAttribute('data-id');
+  });
+  // 初次 render 由 router() 觸發。
+}
+
+/* ============================ 頁面 2：個股詳情 ============================ */
+let charts = [];   // 記錄已建立的圖表，切換股票時清掉重畫
+const hasLWC = typeof LightweightCharts !== 'undefined';  // CDN 是否載入成功
+
+function clearCharts(){
+  charts.forEach(c=>{ try{ c.remove(); }catch(e){} });
+  charts = [];
+}
+
+/* 建一個圖表容器（共用設定）。回傳 chart 物件，失敗回 null。 */
+function makeChart(elId){
+  const el = document.getElementById(elId);
+  el.innerHTML = '';  // 清掉佔位
+  if(!hasLWC){
+    el.innerHTML = '<div class="chart-placeholder">圖表函式庫無法載入（請檢查網路連線）。<br>此處在正式版會顯示互動圖表。</div>';
+    return null;
+  }
+  const chart = LightweightCharts.createChart(el, {
+    width: el.clientWidth, height: el.clientHeight,
+    layout:{ background:{color:'transparent'}, textColor:'#8a909a', fontSize:11 },
+    grid:{ vertLines:{color:'#1d222b'}, horzLines:{color:'#1d222b'} },
+    rightPriceScale:{ borderColor:'#262b35' },
+    timeScale:{ borderColor:'#262b35' },
+    crosshair:{ mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  charts.push(chart);
+  return chart;
+}
+
+/* 策略條件檢查表（個股頁）：逐條 ✓/✗，並含籌碼濾網列。 */
+function renderChecklist(s){
+  const sig = s.sig;
+  const rows = sig.conditions.map(c=>
+    `<li class="${c.pass?'ok':'no'}"><span class="ck">${c.pass?'✓':'✗'}</span>${c.label}</li>`
+  ).join('');
+  const instRow =
+    `<li class="filter ${sig.instBacked?'ok':'no'}"><span class="ck">${sig.instBacked?'✓':'✗'}</span>
+     籌碼濾網：最新三大法人買超（加強訊號「法人挺」）</li>`;
+  const verdict = sig.fired
+    ? '綜合判定：<span class="tag fire">⚡ 發動</span>'
+    : '綜合判定：<span class="muted">未發動（下列至少一項未通過）</span>';
+  document.getElementById('d-checklist').innerHTML =
+    `<div class="verdict">${verdict}</div><ul class="checklist">${rows}${instRow}</ul>`;
+}
+
+/* v3：個股頁改為 async。先丟骨架避免使用者點了沒反應，再 await /api/stock/{id}。
+   後端 ROE 為 null（指定 dataset 無此來源），故所有數字欄都做 null 防呆顯示「—」。 */
+function showStockSkeleton(){
+  document.getElementById('d-name').textContent = '載入中…';
+  document.getElementById('d-id').textContent = '—';
+  document.getElementById('d-price').textContent = '—';
+  const chgEl = document.getElementById('d-chg');
+  chgEl.className = 'chg num';
+  chgEl.textContent = '—';
+  document.getElementById('d-score').textContent = '—';
+  document.getElementById('d-score-bar').style.width = '0%';
+  document.getElementById('d-rating').textContent = '—';
+  document.getElementById('d-checklist').innerHTML = '<div class="muted">載入中…</div>';
+  ['d-roe','d-per','d-yield','d-foreign','d-cap','d-streak'].forEach(k=>{
+    document.getElementById(k).textContent = '—';
+  });
+  ['chart-kline','chart-inst','chart-foreign'].forEach(idc=>{
+    const el = document.getElementById(idc);
+    el.innerHTML = '<div class="chart-placeholder skeleton">圖表載入中…</div>';
+  });
+}
+function fmtNum(v, digits){
+  return (v === null || v === undefined || Number.isNaN(+v)) ? '—' : (+v).toFixed(digits);
+}
+async function renderStock(id){
+  showStockSkeleton();
+  let s;
+  try{
+    s = await loadStock(id);
+  }catch(e){
+    document.getElementById('d-name').textContent = '載入失敗';
+    document.getElementById('d-checklist').innerHTML = `<div class="muted">${e.message}</div>`;
+    return;
+  }
+  if(!s){
+    document.getElementById('d-name').textContent = '找不到此股票';
+    document.getElementById('d-id').textContent = '代號 ' + id;
+    document.getElementById('d-checklist').innerHTML =
+      '<div class="muted">可能為非普通股、未上市，或資料尚未計算。</div>';
+    return;
+  }
+
+  // 頂部基本資訊
+  const fireBadge = s.fired ? ' <span class="tag fire">⚡ 發動</span>' : '';
+  document.getElementById('d-name').innerHTML = s.name + fireBadge;
+  document.getElementById('d-id').textContent = '代號 ' + s.id + ' · 上市';
+  document.getElementById('d-price').textContent = fmt.price(s.price);
+  const chgEl = document.getElementById('d-chg');
+  chgEl.className = 'chg num ' + dirClass(s.changePct);
+  chgEl.textContent = `${fmt.signedInt(s.change)} (${fmt.pct(s.changePct)})`;
+
+  // 評分 + 技術評等
+  document.getElementById('d-score').textContent = s.score ?? '—';
+  document.getElementById('d-score-bar').style.width = (s.score ?? 0) + '%';
+  document.getElementById('d-rating').innerHTML =
+    `<span class="rating ${s.rating.cls}">${s.rating.label}</span>`;
+
+  // 策略條件檢查表
+  renderChecklist(s);
+
+  // 關鍵數據（後端 ROE 為 null → 顯示 —）
+  document.getElementById('d-roe').textContent = fmtNum(s.roe, 1);
+  document.getElementById('d-per').textContent = fmtNum(s.per, 1);
+  document.getElementById('d-yield').textContent = fmtNum(s.yieldPct, 1);
+  document.getElementById('d-foreign').textContent = fmtNum(s.foreignPct, 1);
+  document.getElementById('d-cap').textContent = s.marketCap ? fmt.cap(s.marketCap) : '—';
+  document.getElementById('d-streak').textContent = s.instStreak ?? 0;
+
+  // 圖表（漲紅跌綠：up=紅 down=綠）
+  clearCharts();
+  const UP = '#e63946', DOWN = '#26a69a';
+
+  // K 線（蠟燭圖）+ 標記策略發動日
+  const kc = makeChart('chart-kline');
+  if(kc){
+    const cs = kc.addCandlestickSeries({
+      upColor:UP, downColor:DOWN, borderUpColor:UP, borderDownColor:DOWN,
+      wickUpColor:UP, wickDownColor:DOWN,
+    });
+    cs.setData(s.kline);
+    if(s.fired){
+      // 在發動當日加上箭頭標記，讓使用者看到「訊號發生在哪」
+      cs.setMarkers([{
+        time: s.kline[s.sig.signalIndex].time,
+        position:'aboveBar', color:UP, shape:'arrowDown', text:'發動',
+      }]);
+    }
+    kc.timeScale().fitContent();
+  }
+
+  // 法人買賣超（histogram，逐根上色）
+  const ic = makeChart('chart-inst');
+  if(ic){
+    const hs = ic.addHistogramSeries({ priceFormat:{type:'volume'} });
+    hs.setData(s.instBars.map(d=>({
+      time:d.time, value:d.value, color: d.value>=0 ? UP : DOWN
+    })));
+    ic.timeScale().fitContent();
+  }
+
+  // 外資持股趨勢（line）
+  const fc = makeChart('chart-foreign');
+  if(fc){
+    const ls = fc.addLineSeries({ color:'#3a8fff', lineWidth:2 });
+    ls.setData(s.foreignTrend);
+    fc.timeScale().fitContent();
+  }
+}
+
+/* 視窗縮放時，若正在個股頁就重畫圖表（避免寬度跑掉破版）。 */
+let resizeTimer = null;
+window.addEventListener('resize', ()=>{
+  if(!document.getElementById('page-stock').classList.contains('active')) return;
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(()=>{
+    const m = location.hash.match(/^#\/stock\/(.+)$/);
+    if(m) renderStock(decodeURIComponent(m[1]));
+  }, 150);
+});
+
+/* ============================ 路由（hash）============================ */
+function setActiveTab(name){
+  document.querySelectorAll('nav.tabs a').forEach(a=>{
+    a.classList.toggle('active', a.getAttribute('data-tab')===name);
+  });
+}
+function showPage(pageId){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById(pageId).classList.add('active');
+  window.scrollTo(0,0);
+}
+
+async function router(){
+  clearError();
+  const hash = location.hash || '#/market';
+  const mStock = hash.match(/^#\/stock\/(.+)$/);
+  try{
+    if(mStock){
+      showPage('page-stock');
+      setActiveTab('market');           // 個股頁歸屬於市場總覽
+      await renderStock(decodeURIComponent(mStock[1]));
+    } else if(hash.startsWith('#/screener')){
+      showPage('page-screener');
+      setActiveTab('screener');
+      await loadStocks();               // 雖然 screener 走 API，但 STOCKS 也常用做總數顯示
+      await renderScreener();
+    } else {
+      showPage('page-market');
+      setActiveTab('market');
+      await loadStocks();
+      await loadMarket();
+      renderStrip();
+      renderMarket();
+    }
+  }catch(e){
+    showError('資料載入失敗：' + e.message +
+      '。請確認後端已啟動（http://localhost:8000），且已執行 fetch_and_compute.py。');
+  }
+}
+
+window.addEventListener('hashchange', router);
+
+/* ============================ 頂部股票查詢（即時下拉）============================
+   行為：輸入 ≥1 字 → 過濾已載入的 STOCKS（id 開頭優先，其次名稱子字串），最多顯示 10 筆。
+        ↑↓ 移動選擇、Enter 跳該筆、Esc 關下拉、外點關閉。
+   資料依賴：必須有 STOCKS（router 進入 /market 或 /screener 後即有）；
+   若搜尋時 STOCKS 為空，會 lazy load 一次。 */
+function searchStocks(query){
+  const q = query.trim().toLowerCase();
+  if(!q) return [];
+  const startId = [], partial = [];
+  for(const s of STOCKS){
+    const id = s.id.toLowerCase();
+    const name = (s.name || '').toLowerCase();
+    if(id.startsWith(q)) startId.push(s);                 // 代號前綴匹配最優先
+    else if(id.includes(q) || name.includes(q)) partial.push(s);
+  }
+  return startId.concat(partial).slice(0, 10);
+}
+
+function renderSearchResults(list){
+  const box = document.getElementById('search-results');
+  if(!list.length){
+    box.innerHTML = '<div class="empty">查無符合代號或名稱的股票</div>';
+    box.classList.add('show');
+    return;
+  }
+  box.innerHTML = list.map((s, i) =>
+    `<div class="item${i===0?' active':''}" data-id="${s.id}">
+       <span class="sid">${s.id}</span>
+       <span class="sname">${s.name || ''}</span>
+       <span class="sscore">${typeof s.score === 'number' ? s.score : '—'}</span>
+     </div>`
+  ).join('');
+  box.classList.add('show');
+}
+
+function closeSearch(){
+  document.getElementById('search-results').classList.remove('show');
+}
+
+function gotoSearchHit(id){
+  if(!id) return;
+  const input = document.getElementById('search-input');
+  input.value = '';
+  closeSearch();
+  location.hash = '#/stock/' + encodeURIComponent(id);
+  input.blur();
+}
+
+async function initSearch(){
+  const input = document.getElementById('search-input');
+  const box = document.getElementById('search-results');
+
+  input.addEventListener('input', async ()=>{
+    const q = input.value;
+    if(!q.trim()){ closeSearch(); return; }
+    // 第一次使用搜尋時 STOCKS 可能還沒載入 → 補抓一次
+    if(!STOCKS.length){
+      try{ await loadStocks(); }catch(e){ /* 後端不通就靜默；下面會 render 空結果 */ }
+    }
+    renderSearchResults(searchStocks(q));
+  });
+
+  // 鍵盤導覽：↑↓ 換選、Enter 跳、Esc 關
+  input.addEventListener('keydown', e=>{
+    const items = Array.from(box.querySelectorAll('.item'));
+    if(!items.length){
+      if(e.key === 'Escape'){ closeSearch(); input.blur(); }
+      return;
+    }
+    const cur = items.findIndex(it=>it.classList.contains('active'));
+    if(e.key === 'ArrowDown'){
+      e.preventDefault();
+      items[cur]?.classList.remove('active');
+      items[(cur + 1) % items.length].classList.add('active');
+    }else if(e.key === 'ArrowUp'){
+      e.preventDefault();
+      items[cur]?.classList.remove('active');
+      items[(cur - 1 + items.length) % items.length].classList.add('active');
+    }else if(e.key === 'Enter'){
+      e.preventDefault();
+      const sel = items[cur] || items[0];
+      gotoSearchHit(sel?.getAttribute('data-id'));
+    }else if(e.key === 'Escape'){
+      closeSearch(); input.blur();
+    }
+  });
+
+  // 滑鼠：點 item 直接跳
+  box.addEventListener('click', e=>{
+    const it = e.target.closest('.item[data-id]');
+    if(it) gotoSearchHit(it.getAttribute('data-id'));
+  });
+
+  // 外點關閉
+  document.addEventListener('click', e=>{
+    if(!e.target.closest('#search-box')) closeSearch();
+  });
+
+  // focus 時若已有 query，重新顯示
+  input.addEventListener('focus', ()=>{
+    if(input.value.trim()) renderSearchResults(searchStocks(input.value));
+  });
+}
+
+
+/* ============================ 資料新鮮度輪詢 ============================
+   後端 fetch_and_compute.py 每 12 小時跑一次（Task Scheduler 排程）→ market.updated 會變動。
+   前端每 5 分鐘 poll /api/market；若 updated 不同於上次見過的值，
+   就清掉 STOCKS / STOCK_CACHE 並重畫當前頁——排名、篩選、個股詳情都自動同步最新資料。
+   背景分頁不浪費頻寬：document.hidden 時跳過該輪。 */
+const FRESHNESS_INTERVAL_MS = 5 * 60 * 1000;
+let _lastSeenUpdated = null;
+
+async function checkFreshness(){
+  if(document.hidden) return;
+  let m;
+  try { m = await apiGet('/api/market'); }
+  catch(e){ return; }                             // 後端暫時不通就靜默；下一輪再試
+  if(!m || !m.updated) return;
+  if(_lastSeenUpdated === null){
+    _lastSeenUpdated = m.updated;
+    return;                                       // 首次只記錄、不刷新（避免進站立刻 double load）
+  }
+  if(m.updated === _lastSeenUpdated) return;
+  // 資料世代變了 → 清前端 cache，讓 router 重抓最新版
+  _lastSeenUpdated = m.updated;
+  STOCKS = [];
+  MARKET = null;
+  for(const k of Object.keys(STOCK_CACHE)) delete STOCK_CACHE[k];
+  console.log('[freshness] 偵測到後端更新資料世代 → 重新載入');
+  router();                                       // 重畫目前頁；await 不必要，背景觸發
+}
+
+setInterval(checkFreshness, FRESHNESS_INTERVAL_MS);
+// 切回分頁時也立刻檢查一次：避免使用者離開很久回來看到舊資料
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkFreshness(); });
+
+/* 初始化：先把 UI 互動掛上，再由 router 觸發第一次資料載入。 */
+initMarket();
+initScreener();
+initSearch();
+router();
+// 首次載入完成後立刻把 _lastSeenUpdated 設成當下 MARKET.updated（透過 checkFreshness 完成）。
+setTimeout(checkFreshness, 1500);
+</script>
+</body>
+</html>
